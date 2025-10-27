@@ -1,0 +1,68 @@
+[project]
+name = "gmail"
+version = "0.1.0"
+description = "Local Gmail digest generator with Dashscope-powered summaries."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "google-api-python-client>=2.185.0",
+    "google-auth>=2.41.1",
+    "google-auth-oauthlib>=1.2.2",
+    "httpx>=0.28.1",
+    "loguru>=0.7.3",
+    "openai>=2.6.1",
+    "pydantic>=2.12.3",
+    "pydantic-settings>=2.11.0",
+    "python-dateutil>=2.9.0.post0",
+    "python-dotenv>=1.2.1",
+    "tenacity>=9.1.2",
+    "typer>=0.20.0",
+]
+[project.scripts]
+gmail-digest = "gmail_digest_tool.cli:run"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "ASYNC"]
+ignore = ["N818"]  # allow Error suffix for exceptions
+fixable = ["ALL"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+pretty = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+show_error_codes = true
+plugins = []
+
+[tool.pytest.ini_options]
+addopts = "-q --disable-warnings"
+testpaths = ["tests"]
+python_files = "test_*.py"
+
+[tool.coverage.run]
+branch = true
+source = ["gmail_digest_tool"]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.11.0",
+    "mypy>=1.18.2",
+    "pre-commit>=4.3.0",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "ruff>=0.14.2",
+    "types-python-dateutil>=2.9.0.20251008",
+    "types-requests>=2.32.4.20250913",
+    "vcrpy>=5.1.0",
+]
