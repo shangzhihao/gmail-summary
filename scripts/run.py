@@ -18,7 +18,7 @@ from gmail_digest_tool.main import run_digest  # noqa: E402
 def main() -> None:
     """Generate a digest covering the last ten days of email (including read)."""
     now = datetime.now(UTC)
-    from_dt = now - timedelta(days=0.5)
+    from_dt = now - timedelta(days=3.2)
 
     settings = get_settings()
     output_path = run_digest(

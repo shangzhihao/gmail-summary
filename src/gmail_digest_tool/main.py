@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 
@@ -54,6 +55,7 @@ def run_digest(
         config=SummarizerConfig(
             temperature=settings.summarizer_temperature,
             max_tokens=settings.summarizer_max_tokens,
+            concurrency_limit=settings.summarizer_concurrency,
         ),
     )
 
@@ -65,21 +67,36 @@ def run_digest(
     )
     logger.info(f"Fetched {len(messages)} new messages for summarization.")
 
-    summaries: list[EmailSummary] = []
-    for message in messages:
-        subject_preview = (
-            message.subject
-            if len(message.subject) <= 80
-            else f"{message.subject[:77]}..."
-        )
-        logger.info(
-            f"Summarizing message {message.id} from {message.sender} "
-            f"(subject={subject_preview})"
-        )
+    def _summarize_async() -> list[EmailSummary]:
         try:
-            summaries.append(summarizer.summarize_email(message))
-        except Exception as error:  # pragma: no cover - defensive
-            logger.exception(f"Failed to summarize message {message.id}: {error}")
+            return asyncio.run(summarizer.summarize_many_async(messages))
+        except RuntimeError as error:  # pragma: no cover - fallback for nested loops
+            if "asyncio.run() cannot be called" not in str(error):
+                raise
+            logger.warning(
+                "Async summarization unavailable in current event loop; "
+                "falling back to sequential mode."
+            )
+            sequential_summaries: list[EmailSummary] = []
+            for message in messages:
+                subject_preview = (
+                    message.subject
+                    if len(message.subject) <= 80
+                    else f"{message.subject[:77]}..."
+                )
+                logger.info(
+                    f"Summarizing message {message.id} from {message.sender} "
+                    f"(subject={subject_preview})"
+                )
+                try:
+                    sequential_summaries.append(summarizer.summarize_email(message))
+                except Exception as inner_error:  # pragma: no cover - defensive
+                    logger.exception(
+                        f"Failed to summarize message {message.id}: {inner_error}",
+                    )
+            return sequential_summaries
+
+    summaries = _summarize_async()
 
     summary_store.append(
         SummaryRecord(

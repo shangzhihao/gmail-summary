@@ -49,6 +49,13 @@ class AppSettings(BaseSettings):
             "DIGEST_SUMMARIZER_MAX_TOKENS",
         ),
     )
+    summarizer_concurrency: int = Field(
+        default=4,
+        validation_alias=AliasChoices(
+            "SUMMARIZER_CONCURRENCY",
+            "DIGEST_SUMMARIZER_CONCURRENCY",
+        ),
+    )
 
     gmail_credentials_path: Path = Field(
         default=Path("credentials.json"),
