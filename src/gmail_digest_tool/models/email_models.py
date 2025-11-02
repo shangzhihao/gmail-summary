@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import binascii
+import codecs
 import quopri
 import re
 from base64 import b64decode, urlsafe_b64decode
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import unescape
 from typing import Any
@@ -16,6 +18,18 @@ BASE64_ALLOWED_BYTES = set(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r-_"
 )
 PRINTABLE_BYTES = set(range(32, 127)) | {9, 10, 13}
+DEFAULT_CHARSET = "utf-8"
+FALLBACK_CHARSETS: tuple[str, ...] = (DEFAULT_CHARSET, "windows-1252", "latin-1")
+
+
+@dataclass(frozen=True)
+class DecodedBodyPart:
+    """Decoded representation of a MIME body part."""
+
+    mime_type: str
+    text: str
+    charset: str
+    declared_charset: str | None = None
 
 
 class EmailMessage(BaseModel):
@@ -28,6 +42,8 @@ class EmailMessage(BaseModel):
     recipients: list[str] = Field(default_factory=list)
     snippet: str
     body_text: str
+    body_charset: str = Field(default=DEFAULT_CHARSET)
+    body_declared_charset: str | None = Field(default=None)
     internal_date: datetime
     labels: list[str] = Field(default_factory=list)
     gmail_metadata: dict[str, Any] = Field(default_factory=dict)
@@ -51,7 +67,7 @@ class EmailMessage(BaseModel):
         if "to" in headers:
             recipients = [addr.strip() for addr in headers["to"].split(",") if addr]
 
-        body_text = extract_body_text(payload.get("payload", {}))
+        body_content = extract_body_content(payload.get("payload", {}))
 
         return cls(
             id=payload["id"],
@@ -60,7 +76,9 @@ class EmailMessage(BaseModel):
             sender=sender,
             recipients=recipients,
             snippet=payload.get("snippet", ""),
-            body_text=body_text,
+            body_text=body_content.text,
+            body_charset=body_content.charset,
+            body_declared_charset=body_content.declared_charset,
             internal_date=internal_date,
             labels=payload.get("labelIds", []),
             gmail_metadata=payload,
@@ -81,68 +99,102 @@ class EmailSummary(BaseModel):
 
 def extract_body_text(payload: dict[str, Any]) -> str:
     """Extract plain-text body content from a Gmail message payload."""
+    return extract_body_content(payload).text
+
+
+def extract_body_content(payload: dict[str, Any]) -> DecodedBodyPart:
+    """Extract plain-text body content from a Gmail message payload."""
     if not payload:
-        return ""
+        return DecodedBodyPart(
+            mime_type="",
+            text="",
+            charset=DEFAULT_CHARSET,
+            declared_charset=None,
+        )
 
     candidates = _gather_text_parts(payload)
-    for mime_type, text in candidates:
-        stripped = text.strip()
-        if mime_type == "text/plain" and stripped:
-            return stripped
+    for part in candidates:
+        stripped = part.text.strip()
+        if part.mime_type == "text/plain" and stripped:
+            return DecodedBodyPart(
+                mime_type="text/plain",
+                text=stripped,
+                charset=part.charset,
+                declared_charset=part.declared_charset,
+            )
 
-    for mime_type, text in candidates:
-        stripped = text.strip()
-        if mime_type == "text/html" and stripped:
-            return _html_to_plain_text(stripped)
+    for part in candidates:
+        stripped = part.text.strip()
+        if part.mime_type == "text/html" and stripped:
+            return DecodedBodyPart(
+                mime_type="text/plain",
+                text=_html_to_plain_text(stripped),
+                charset=part.charset,
+                declared_charset=part.declared_charset,
+            )
 
-    for _, text in candidates:
-        stripped = text.strip()
+    for part in candidates:
+        stripped = part.text.strip()
         if stripped:
-            return stripped
+            return DecodedBodyPart(
+                mime_type=part.mime_type or "text/plain",
+                text=stripped,
+                charset=part.charset,
+                declared_charset=part.declared_charset,
+            )
 
-    return ""
+    return DecodedBodyPart(
+        mime_type="",
+        text="",
+        charset=DEFAULT_CHARSET,
+        declared_charset=None,
+    )
 
 
-def _gather_text_parts(payload: dict[str, Any]) -> list[tuple[str, str]]:
-    """Recursively collect (mime_type, text) tuples from the payload."""
+def _gather_text_parts(payload: dict[str, Any]) -> list[DecodedBodyPart]:
+    """Recursively collect decoded text parts from the payload."""
     mime_type = (payload.get("mimeType") or "").lower()
     if mime_type.startswith("multipart/"):
-        texts: list[tuple[str, str]] = []
+        texts: list[DecodedBodyPart] = []
         for part in payload.get("parts", []):
             texts.extend(_gather_text_parts(part))
         return texts
 
-    text = _decode_part_to_text(payload)
-    if text:
-        return [(mime_type, text)]
+    decoded_part = _decode_part_to_text(payload)
+    if decoded_part:
+        return [decoded_part]
     return []
 
 
-def _decode_part_to_text(part: dict[str, Any]) -> str:
+def _decode_part_to_text(part: dict[str, Any]) -> DecodedBodyPart | None:
     """Decode a single MIME part into text."""
     mime_type = (part.get("mimeType") or "").lower()
     if not mime_type.startswith("text/"):
-        return ""
+        return None
 
     body = part.get("body") or {}
     data = body.get("data")
     if not data or body.get("attachmentId"):
-        return ""
+        return None
 
     decoded = _decode_body_data(data)
     if not decoded:
-        return ""
+        return None
 
     headers = _build_header_map(part)
     transfer_encoding = headers.get("content-transfer-encoding", "")
     decoded = _apply_transfer_encoding(decoded, transfer_encoding)
     decoded = _maybe_decode_nested_base64(decoded, transfer_encoding)
 
-    charset = _extract_charset(headers)
-    try:
-        return decoded.decode(charset, errors="ignore")
-    except LookupError:
-        return decoded.decode("utf-8", errors="ignore")
+    declared_charset = _extract_charset(headers)
+    text, effective_charset = _decode_bytes_with_charset(decoded, declared_charset)
+
+    return DecodedBodyPart(
+        mime_type=mime_type,
+        text=text,
+        charset=effective_charset,
+        declared_charset=declared_charset,
+    )
 
 
 def _decode_body_data(data: str) -> bytes:
@@ -212,15 +264,85 @@ def _is_likely_text(data: bytes) -> bool:
     return printable / len(data) >= 0.75
 
 
-def _extract_charset(headers: dict[str, str]) -> str:
-    """Determine the charset for decoding the bytes payload."""
+def _decode_bytes_with_charset(
+    data: bytes, declared_charset: str | None
+) -> tuple[str, str]:
+    """Decode bytes using the declared charset with sensible fallbacks."""
+    candidates = _build_charset_candidates(declared_charset)
+    for candidate in candidates:
+        try:
+            return data.decode(candidate, errors="strict"), candidate
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    # Final fallback: replace undecodable bytes using UTF-8.
+    return data.decode(DEFAULT_CHARSET, errors="replace"), DEFAULT_CHARSET
+
+
+def _build_charset_candidates(declared_charset: str | None) -> list[str]:
+    """Return the ordered list of charset candidates to try for decoding."""
+    candidates: list[str] = []
+    if declared_charset:
+        stripped = declared_charset.strip()
+        if stripped and stripped not in candidates:
+            candidates.append(stripped)
+
+        normalized = _normalize_charset_name(stripped)
+        if normalized and normalized not in candidates:
+            candidates.insert(0, normalized)
+
+        lowered = stripped.lower()
+        if lowered not in candidates:
+            candidates.append(lowered)
+
+        dashed = lowered.replace("_", "-")
+        if dashed not in candidates:
+            candidates.append(dashed)
+
+    for fallback in FALLBACK_CHARSETS:
+        if fallback not in candidates:
+            candidates.append(fallback)
+
+    return candidates
+
+
+def _normalize_charset_name(charset: str | None) -> str | None:
+    """Return a Python-compatible charset name if available."""
+    if not charset:
+        return None
+
+    cleaned = charset.strip().strip('"').strip("'")
+    if not cleaned:
+        return None
+
+    for candidate in (
+        cleaned,
+        cleaned.lower(),
+        cleaned.lower().replace("_", "-"),
+    ):
+        try:
+            codecs.lookup(candidate)
+        except LookupError:
+            continue
+        return candidate
+
+    return None
+
+
+def _extract_charset(headers: dict[str, str]) -> str | None:
+    """Determine the charset declared for a MIME part, if any."""
     content_type = headers.get("content-type", "")
     match = re.search(
         r"charset=([\"']?)([^;\"']+)\1", content_type, flags=re.IGNORECASE
     )
     if match:
         return match.group(2).strip()
-    return "utf-8"
+
+    charset_header = headers.get("charset")
+    if charset_header:
+        return charset_header.strip()
+
+    return None
 
 
 def _html_to_plain_text(html: str) -> str:

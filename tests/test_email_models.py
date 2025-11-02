@@ -4,7 +4,11 @@ import base64
 import quopri
 from datetime import UTC
 
-from gmail_digest_tool.models.email_models import EmailMessage, extract_body_text
+from gmail_digest_tool.models.email_models import (
+    EmailMessage,
+    extract_body_content,
+    extract_body_text,
+)
 
 
 def test_email_message_from_gmail_api_extracts_fields() -> None:
@@ -36,6 +40,8 @@ def test_email_message_from_gmail_api_extracts_fields() -> None:
     assert message.subject == "Test Subject"
     assert message.sender == "sender@example.com"
     assert message.body_text == "Hello World!"
+    assert message.body_charset == "utf-8"
+    assert message.body_declared_charset is None
     assert message.internal_date.tzinfo == UTC
 
 
@@ -91,3 +97,43 @@ def test_extract_body_text_decodes_quoted_printable() -> None:
     }
 
     assert extract_body_text(payload) == original
+
+
+def test_extract_body_content_preserves_iso_charset() -> None:
+    original = "Olá Café"
+    raw_bytes = original.encode("iso-8859-1")
+    gmail_data = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
+
+    payload = {
+        "mimeType": "text/plain",
+        "headers": [
+            {"name": "Content-Transfer-Encoding", "value": "7bit"},
+            {"name": "Content-Type", "value": 'text/plain; charset="iso-8859-1"'},
+        ],
+        "body": {"data": gmail_data},
+    }
+
+    body = extract_body_content(payload)
+    assert body.text == original
+    assert body.charset == "iso-8859-1"
+    assert body.declared_charset == "iso-8859-1"
+
+
+def test_extract_body_content_handles_unknown_charset_with_fallback() -> None:
+    original = "Status: all systems go 🚀"
+    raw_bytes = original.encode("utf-8")
+    gmail_data = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
+
+    payload = {
+        "mimeType": "text/plain",
+        "headers": [
+            {"name": "Content-Transfer-Encoding", "value": "7bit"},
+            {"name": "Content-Type", "value": 'text/plain; charset="x-unknown"'},
+        ],
+        "body": {"data": gmail_data},
+    }
+
+    body = extract_body_content(payload)
+    assert body.text == original
+    assert body.charset == "utf-8"
+    assert body.declared_charset == "x-unknown"
